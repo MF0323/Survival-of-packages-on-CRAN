@@ -1,0 +1,442 @@
+---
+title: "Survival of packages on CRAN"
+author: "Xuan Fang"
+date: "06/2020"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(s20x)
+library(MASS)
+library(MuMIn)
+library(statmod)
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(reshape2)
+library(GGally)
+library(mgcv)
+library(vioplot)
+library(pROC)
+library(gridExtra)
+library(tibble)
+library(plyr)
+library(Matrix)
+library(lubridate)
+library(survival)
+library(geeM)
+```
+
+
+# Background
+
+There are a lot of R packages on CRAN, with the number growing exponentially over time. However, not all the packages stay there: they may be removed from the live version of CRAN by the author's request or because they don't work with the current version of R. All current and past packages are stored in the CRAN archive.
+
+In recent years, many more people have been writing packages, and packages have tended to have more *dependencies* on other packages. This might be expected to lead to packages that don't last as long.
+
+
+The file `alldates.rda` contains a single data frame `all_dates`, with variables listed as follows:
+
+Variable  | Description
+:---      |:---  
+pkg       | the name of the package
+cran_date | the date the current version was put on CRAN
+first     | the oldest date when a version was put into archive
+latest    | the most recent date when a version was put into archive
+
+Note: The dates are offsets from 1970/1/1
+
+The file `snapshots.rda` contains two data frames:
+
+a: the result of `available.packages()`, a matrix listing all available CRAN packages on 2020-6-2. 
+
+b: the result of `available.packages()` as it would have been on 2015-6-2, via the Microsoft CRAN Time Machine.
+
+Our Tasks are:
+
+1. Describe how the longevity of CRAN packages has changed over time
+
+2. Describe how version number, dependencies, and license relate to the probability of a 2015 package surviving to 2020 (as a binary outcome)
+
+3. Describe how dependencies, and license relate to the subsequent survival time of a package on CRAN in 2015
+
+
+# Load datasets
+```{r}
+# Load the data
+load(file = "alldates-1.rda")
+load(file = "snapshots.rda")
+```
+
+# Task One
+## Section 1: Data exploratory and data cleaning
+### Pre-analysis exploratory: Examining `all_dates` dataset
+```{r}
+str(all_dates)
+```
+
+We notice there are 'Inf'/'-Inf' values in the `first` and `latest` columns.
+```{r}
+summary(all_dates)
+```
+
+```{r}
+head(all_dates)
+```
+
+
+### Data cleaning
+
+Remove records that have `first` = inf (and `latest` = -inf), which are implausible. But for `pkg = "sergeant"`, we set its `first` and `latest` columns to `NA` since it has value in `cran_date`.
+```{r}
+# Have a look at the records that have `first = inf` (and `latest = -inf`):
+all_dates[is.infinite(all_dates$first), ]
+```
+
+```{r}
+# For pkg = "sergeant", we set first and latest to "NA":
+all_dates$first[all_dates$pkg=="sergeant"] <- NA
+all_dates$latest[all_dates$pkg=="sergeant"] <- NA
+```
+
+```{r}
+# For the rest records, we just delete them, and now we get 18,628 records:
+all_dates <- subset(all_dates, !is.infinite(all_dates$first))
+summary(all_dates)
+```
+
+```{r}
+# If package is not 'alive', there will have an 'NA' in cran_date column. (2915 records)
+summary(all_dates[is.na(all_dates$cran_date), ])
+```
+
+#### Commentary:
+There are 2,915 records that "cran_date" is 'NA', suggesting those packages are died (i.e. have been removed).
+
+For those records that `cran_date` is not 'NA' (meaning it is alive) but the `first` and `latest` are both 'NA' means the version on CRAN is the first version, so there are no archived versions.
+```{r}
+# Take a look at those records (3758 records):
+test <- subset(all_dates, is.na(first)&is.na(latest))
+test$cran <- as.Date(test$cran_date)
+summary(test)
+```
+
+
+### Adding new variables:
+
+First, we want to create a new variable `end_date` that is the removal date for packages that are removed, or presumably at the time the data were downloaded, which is 2020-6-2. If the package is still alive, it is censored either when the data was retrieved or at the date the current version appeared on CRAN. There are arguments in favour of either choice. Nevertheless, we decide to set the `end_date` as the date were downloaded.
+```{r}
+end_date_num <- ifelse(is.na(all_dates$cran_date), all_dates$latest, as.Date("2020-6-2"))
+all_dates$end_date <- end_date_num
+summary(all_dates)
+```
+
+Then, we create a new variable `removed` as an event(removal) indicator.
+```{r}
+all_dates$removed<- is.na(all_dates$cran_date)
+```
+
+
+## Section 2: Data analysis
+
+The biggest problem is that we don’t have the date the package first appeared on CRAN unless the current version is the first version: `first` is the first date the package was archived, which is either the date of the second version or is when the package was removed from CRAN, whichever is earlier. We’re going to use `first` as the start date because it’s what we’ve got and it isn’t bad.
+
+We're looking at survival from `first` arrival on CRAN, which is time zero, and the end of observation time is `end_date`-`first`. The event indicator is `is.na(cran_date)`, which we created previously as `removed``.
+
+
+```{r}
+summary(as.Date(all_dates$first))
+```
+
+
+Fit a Cox model by defining a `start_period` variable:
+```{r}
+cut_points<- as.Date(c("1996-1-1","2001-1-1","2006-1-1","2011-1-1","2016-1-1","2020-6-3"))
+all_dates$start_period <- with(all_dates, cut(as.Date(first), cut_points))
+coxph(Surv(end_date-first, removed)~start_period, data=all_dates)
+```
+
+Visualization:
+```{r}
+cran_periods<-survfit(Surv(end_date-first, removed)~start_period, data=all_dates)
+plot(cran_periods, col = 1:5, lwd = 2, xscale = 365, 
+     xlab = "Years on CRAN", ylab = "Proportion surviving", main = "Survival Curve")
+legend("bottomleft", bty = "n", ncol = 2, lwd = 2, col = 1:5, legend=paste("from",cut_points)[-6])
+```
+
+
+#### Summary
+The hazard ratio for 2001-2010 group of packages to 1996-2000 group of packages (baseline group) is 0.849, so 2001-2010 group of packages had a 15.1% lower rate (hazard) of death than the baseline group (on average, over the follow-up time);
+
+The hazard ratio for 2006-2010 group of packages to 1996-2000 group of packages (baseline group) is 1.006, so 2006-2010 group of packages had a hazard of death very similar to the baseline group (on average, over the follow-up time);
+
+The hazard ratio for 2011-2015 group of packages to 1996-2000 group of packages (baseline group) is 0.855, so 2011-2015 group of packages had a 14.5% lower rate (hazard) of death than the baseline group (on average, over the follow-up time);
+
+The hazard ratio for 2016-2020 group of packages to 1996-2000 group of packages (baseline group) is 0.571, so the 2016-2020 group of packages had a 42.9% lower rate (hazard) of death than the baseline group (on average, over the follow-up time).
+
+In conclusion, early packages died faster, then things improved, but have gotten worse around 2010. One possible explanation is that package namespaces were made compulsory in R 2.14.0. And the hazard rate (survival has been higher) has been lower in recent years, suggesting longer longevity in recent years.
+
+
+# Task Two
+## Describe how version number, dependencies, and license relate to the probability of a 2015 package surviving to 2020 (as a binary outcome)
+
+Convert matrix to data frame:
+```{r}
+# For a (the result of available.packages(), a matrix listing all available CRAN packages on 2020-6-2.)
+A.df <- as.data.frame(a, row.names = FALSE)
+A.df <- A.df[c("Package", "Version", "Depends", "License")]
+head(A.df)
+```
+
+```{r}
+# For b (the result of available.packages() as it would have been on 2015-6-2, via the Microsoft CRAN Time Machine.)
+B.df <- as.data.frame(b, row.names = FALSE)
+B.df <- B.df[c("Package", "Version", "Depends", "License")]
+B.df <- B.df[!is.na(B.df$Package), ]
+head(B.df)
+```
+
+## Create new variables
+### Binary outcome variable: Survived
+Create a binary for the 2015 package surviving to 2020:
+```{r}
+Survived <-  B.df[,"Package"] %in% A.df[,"Package"]
+# Take a look at the result:
+table(Survived)
+# Convert it to 0/1 variable: 0 for survived, 1 for died:
+B.df$Survived <- as.factor(as.numeric(B.df[,"Package"] %in% A.df[,"Package"]))
+```
+
+### Version variable: Version_new
+Extract the first numeric component (before the first 'dot') of the `Version` variable and make a new variable `Version_new`:
+```{r}
+Version_new <- substr(B.df$Version, 1, regexpr('[.]', B.df$Version)-1)
+# Take a look at the result:
+table(Version_new)
+```
+
+We define `Version_new` that does not fall into (0, 4) as "others":
+```{r}
+B.df$Version_new <- as.factor(ifelse(as.numeric(substring(Version_new, 1, 2))<=4, Version_new, "others"))
+table(B.df$Version_new)
+```
+
+#### Commentary:
+In the 2015 data, most of the observations fall into category '1' and '0', then followed by category '2', '3', and '4'. The rest of categories are minority, thus in order to reduce the levels of the `Version_new` variable we make them into category 'others'.
+
+Visualization:
+```{r}
+# Mosaic plot of the version category v.s. Survived
+with(B.df, mosaicplot(table(Version_new, Survived), col=c("yellow","blue"), 
+                      main="Version Category", ylab = "1 = Survived   0 = Died"))
+```
+
+#### Commentary:
+The mosaic plot shows version category '4' has the largest proportion of packages survived, followed by 'others', '2'; version category '1' and '3' has the similar proportion of packages survived; version category '0' has the lowest proportion of survival. It seems that the updates version (which has higher first numeric component) tend to have higher proportion of survival.
+
+### Dependencies variables: `Depends_on_version` and `Num_Depends`
+
+1) Create a binary `Depends_on_version` for dependencies on a version/versions: we know that there will be parentheses in the variable if the package has dependencies on a version/versions:
+```{r}
+# Convert it to 0/1 variable: 0 for non-dependency, 1 for dependency:
+B.df$Depends_on_version <- as.factor(as.numeric(grepl("[(]>=", B.df$Depends)))
+```
+
+Visualization:
+```{r}
+# Mosaic plot of the version  Depends_on_version v.s. Survived
+with(B.df, mosaicplot(table(Depends_on_version, Survived), col=c("yellow","blue"), 
+                      main="Depends on a version/versions", ylab = "1 = Survived     0 = Died"))
+```
+
+#### Commentary:
+It seems that a package that has no dependency on other a version/versions has a relatively higher probability of survival rate, but that not be significant.
+
+2) Create a variable `Num_Depends` which count the number of dependencies:
+```{r}
+# Split the strings:
+Depends_split <- strsplit(as.character(B.df$Depends), ",")
+# Use gregexpr to count the number of dependences:
+B.df$Num_Depends <- sapply((gregexpr("[A-Za-z]{2,}", Depends_split, ignore.case = TRUE)), 
+                           function(i) sum(i > 0))
+```
+
+
+```{r}
+table(B.df$Num_Depends)
+```
+
+
+Visualization:
+```{r}
+# Mosaic plot of the version Num_Depends v.s. Survived
+with(B.df, mosaicplot(table(Num_Depends, Survived), col=c("yellow","blue"), 
+                      main="Number of dependencies", ylab = "1 = Survived                   0 = Died"))
+```
+
+#### Commentary:
+The mosaic plot shows that the higher number of dependencies on other packages, the lower the survival probability of a package is.
+
+
+### License variables: `License_new` & `License_alt`
+
+1) Create a new variable `License_new`, which regroup the license categories.
+
+```{r}
+# Take a look at the frequency table of License
+table(B.df$License)
+```
+
+#### Commentary:
+In the 2015 data, there are 10 licenses that appear more than 50 times, and 7 of the 10 are GPL-2 or GPL-3 or some combination, which are: `GPL (>= 2)` (with 2631 times),  `GPL-2` (with 1451 times), `GPL-3` (with 700 times), `GPL` (with 380 times), `GPL (>= 3)` (with 307 times), `GPL-2 | GPL-3` (with 153 times) and `GPL (>= 2.0)` (with 73 times). 
+
+```{r}
+License_new <- as.vector(B.df$License)
+# Make "GPL-2", "GPL (>= 2)" and "GPL (>= 2.0)" into "GPL (version 2 or later) Group"
+Condition1 <- ifelse(B.df$License == "GPL-2"|B.df$License == "GPL (>= 2)"| B.df$License == "GPL (>= 2.0)", 
+                     "GPL(V2+) Group", License_new)
+# Make "GPL-3" and "GPL (>= 3)" into "GPL (version 3 or later) Group"
+Condition2 <- ifelse(B.df$License == "GPL-3"|B.df$License == "GPL (>= 3)", "GPL(V3+) Group", Condition1)
+# The rest of high frequency categories remains, but make the low frequency categories into "Others"
+Condition3 <- ifelse(
+Condition2!="BSD_3_clause + file LICENSE"&Condition2!="GPL"&Condition2!="GPL-2|GPL-3"&Condition2!="LGPL-3"&Condition2!="MIT + file LICENSE"&Condition2!="GPL(V2+) Group"&Condition2!="GPL(V3+) Group", 
+"Others", 
+Condition2)
+# Create a new variable in the data frame:
+B.df$License_new <- Condition3 
+B.df$License_new <- as.factor(B.df$License_new)
+```
+
+```{r}
+table(B.df$License_new)
+```
+
+
+```{r}
+# Mosaic plot of the version Num_Depends v.s. Survived
+with(B.df, mosaicplot(table(License_new, Survived), col=c("yellow","blue"), 
+                      main="License categories", ylab = "1 = Survived                   0 = Died"))
+```
+
+2) Create a binary `License_alt` for whether there are alternatives License: we know the strings will be separated by "|" characters characters if there are alternatives.
+```{r}
+B.df$License_alt <- as.factor(as.numeric(grepl("[|]", B.df$License)))
+```
+
+Visualization:
+```{r}
+# Mosaic plot of the version License_alt v.s. Survived
+with(B.df, mosaicplot(table(License_alt, Survived), col=c("yellow","blue"), 
+                      main="Whether there are alternative License", ylab = "1 = Survived                   0 = Died"))
+```
+
+#### Commentary:
+Whether there are alternative license seems affect little on the probability of survival.
+
+
+## Modelling
+Implement the binomial regression model:
+```{r}
+# Relevel the License_new
+B.df <- within(B.df, License_new <- relevel(License_new, ref = "Others"))
+```
+
+
+```{r}
+mod.bin <- glm(Survived~Version_new+Depends_on_version+Num_Depends+License_new+License_alt, 
+               data = B.df, family = binomial(link = "logit"))
+summary(mod.bin)
+```
+
+License doesn’t seem to matter. Number of dependencies does, and version might.
+
+
+```{r}
+mod.bin2 <- glm(Survived~Version_new+Depends_on_version+Num_Depends, 
+                data = B.df, family = binomial(link = "logit"))
+summary(mod.bin2)
+```
+
+It seems that versioned dependencies doesn't matter much.
+
+```{r}
+mod.bin3 <- glm(Survived~factor(Num_Depends)+Version_new, 
+                data = B.df, family = binomial(link = "logit"))
+summary(mod.bin3)
+```
+
+```{r}
+trendscatter(1:8, coef(mod.bin3)[2:9], xlab = "number of dependencies",
+             ylab = "coefficient magnitude", main = "")
+```
+
+It looks like a linear decrease in general.
+
+
+```{r}
+B.df$Version_new0<-ifelse(B.df$Version_new %in% c(1, 2, 3, 4), "1-4", B.df$Version_new)
+mod.bin4 <- glm(Survived~Num_Depends+Version_new0, data = B.df, family = binomial(link = "logit"))
+summary(mod.bin4)
+```
+
+The exponentiated estimates for variables:
+```{r}
+round(exp(coef(mod.bin4)), 3)
+```
+
+The exponentiated confidence intervals for variables:
+```{r}
+round(exp(confint(mod.bin4)), 3)
+```
+
+## Summary
+License doesn’t seem to be related to package survival. Packages with more dependences were less likely to survive, by a factor of 0.88 per dependency; versioned dependencies didn’t matter much.
+
+Packages in version 0 were the least likely to have survived. Those with numeric versions starting 1, 2, 3, and 4 were about 1.26 as likely, and those with other numbering schemes were substantially more likely (probably because these represented people with pre-existing versioning policies from experience with programming).
+
+# Task Three
+## Describe how  dependencies, and license relate to the subsequent survival time of a package on CRAN in 2015
+
+
+## Data Cleaning
+```{r}
+# Rename the column in B.df to make it consistent with all_dates'
+colnames(B.df)[1] <- "pkg"
+```
+
+```{r}
+# Combine the 2 data frame into one:
+combined.df <- merge(all_dates, B.df, all=TRUE)
+# Delete those records 'Survived' information is NA:
+combined.df <- subset(combined.df, !is.na(Survived))
+```
+
+## Modelling
+
+Implement the Cox model:
+```{r}
+modelcox1 <- coxph(Surv(end_date - as.numeric(as.Date("2015-06-02")), Survived==0)~Version_new+Depends_on_version+Num_Depends+License_new+License_alt, data=combined.df)
+modelcox1
+```
+
+
+```{r}
+modelcox2 <-coxph(Surv(end_date - as.numeric(as.Date("2015-06-02")), Survived==0)~Version_new0+Num_Depends, data=combined.df)
+modelcox2
+```
+
+
+## Summary
+The hazard ratio for `Num_Depends` is 1.122, so packages with a 1 number higher in the dependency on other packages had a 12.2% higher rate (hazard) of death (on average, over the follow-up time).
+
+The hazard ratio for a 2015 package in version category '1-4' to version category '0' (baseline group) is 0.818, so package in version category '1' had a 18.2% lower rate (hazard) of death than the baseline group (on average, over the follow-up time);
+
+The hazard ratio for a 2015 package in version category 'others' to version category '0' (baseline group) is 0.557, so package in version category '1' had a 44.3% lower rate (hazard) of death than the baseline group (on average, over the follow-up time);
+
+In conclusion, the Cox model gives a very similar message to the logistic model. The coefficients have similar magnitudes (but opposite signs) and so do the standard errors. 
