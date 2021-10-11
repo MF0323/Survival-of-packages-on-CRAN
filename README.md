@@ -19,7 +19,7 @@ In recent years, many more people have been writing packages, and packages have 
 
 ## The file snapshots.rda contains two data frames:
 a: the result of `available.packages()`, a matrix listing all available CRAN packages on 2020-6-2.
-b: the result of `available.packages(`) as it would have been on 2015-6-2, via the Microsoft CRAN Time
+b: the result of `available.packages()` as it would have been on 2015-6-2, via the Microsoft CRAN Time
 Machine.
 
 ## Our Tasks are:
